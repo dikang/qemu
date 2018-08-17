@@ -36,7 +36,7 @@
 
 #include "hw/fdt_generic_util.h"
 
-//#define DEBUG_UNASSIGNED
+#define DEBUG_UNASSIGNED
 
 static unsigned memory_region_transaction_depth;
 static bool memory_region_update_pending;
@@ -1045,6 +1045,7 @@ static void flatviews_init(void)
     }
 }
 
+	extern MemoryRegion *nvic_region;
 static void flatviews_reset(void)
 {
     AddressSpace *as;
@@ -1058,6 +1059,15 @@ static void flatviews_reset(void)
     /* Render unique FVs */
     QTAILQ_FOREACH(as, &address_spaces, address_spaces_link) {
         MemoryRegion *physmr = memory_region_get_flatview_root(as->root);
+
+#if 1
+	//if (!nvic_region->container && as->root == get_system_memory())
+	//if (!nvic_region->container && physmr == (MemoryRegion *)0x55555709d400) {
+	if (!nvic_region->container && physmr == (MemoryRegion *)0x55555731dc20) {
+        	//memory_region_add_subregion_overlap(physmr, 0xe000e000, nvic_region, 100);
+        	memory_region_add_subregion(physmr, 0xe000e000, nvic_region);
+	}
+#endif
 
         if (g_hash_table_lookup(flat_views, physmr)) {
             continue;
@@ -3192,11 +3202,12 @@ static void mtree_print_mr(fprintf_function mon_printf, void *f,
                    mr->enabled ? "" : " [disabled]");
     } else {
         mon_printf(f,
-                   TARGET_FMT_plx "-" TARGET_FMT_plx " (prio %d, %s): %s%s\n",
+                   TARGET_FMT_plx "-" TARGET_FMT_plx " (prio %d, %s): %s (%p) %s\n",
                    cur_start, cur_end,
                    mr->priority,
                    memory_region_type((MemoryRegion *)mr),
                    memory_region_name(mr),
+                   mr,
                    mr->enabled ? "" : " [disabled]");
     }
 
