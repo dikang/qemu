@@ -146,6 +146,9 @@ static void arm_cpu_reset(CPUState *s)
     vaddr old_pc = cc->get_pc(s);
 #endif
 
+    /* Needs to precede parent_reset, because parent_reset acts on this. */
+    s->halted = s->arch_halt_pin = cpu->power_state == PSCI_OFF;
+
     acc->parent_reset(s);
 
     memset(env, 0, offsetof(CPUARMState, end_reset_fields));
@@ -157,10 +160,6 @@ static void arm_cpu_reset(CPUState *s)
     env->vfp.xregs[ARM_VFP_MVFR0] = cpu->mvfr0;
     env->vfp.xregs[ARM_VFP_MVFR1] = cpu->mvfr1;
     env->vfp.xregs[ARM_VFP_MVFR2] = cpu->mvfr2;
-
-    cpu->power_state = cpu->start_powered_off || s->arch_halt_pin ?
-                           PSCI_OFF : PSCI_ON;
-    s->halted = cpu->start_powered_off || s->halt_pin || s->arch_halt_pin;
 
     /* Reset value of SCTLR_V is controlled by input signal VINITHI.  */
     env->cp15.sctlr_ns &= ~SCTLR_V;
@@ -578,7 +577,7 @@ static void arm_cpu_set_ncpuhalt(void *opaque, int irq, int level)
     cpu->power_state = level ? PSCI_OFF : PSCI_ON;
     cpu_halt_update(cs);
 
-    if (cs->arch_halt_pin != old_value && !cs->arch_halt_pin) {
+    if (cs->arch_halt_pin != old_value && !cs->arch_halt_pin && !cs->reset_pin) {
         cpu_interrupt(cs, CPU_INTERRUPT_EXITTB);
     }
 }
@@ -1070,6 +1069,8 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
         }
     }
 
+    cpu->power_state = cpu->start_powered_off ? PSCI_OFF : PSCI_ON;
+
     if (!cpu->has_el3) {
         /* If the has_el3 CPU property is disabled then we need to disable the
          * feature.
@@ -1184,18 +1185,24 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
         if (!cpu->secure_memory) {
             cpu->secure_memory = cs->memory;
         }
-        address_space_init(as, cpu->secure_memory, "cpu-secure-memory");
+        char *as_s_name = g_strdup_printf("cpu-secure-memory-%s", cs->parent_obj.id);
+        address_space_init(as, cpu->secure_memory, as_s_name);
         cpu_address_space_init(cs, as, ARMASIdx_S);
     } else {
         cs->num_ases = 1;
     }
     as = g_new0(AddressSpace, 1);
-    address_space_init(as, cs->memory, "cpu-memory");
+
+    char *as_ns_name = g_strdup_printf("cpu-memory-%s", cs->parent_obj.id);
+    address_space_init(as, cs->memory, as_ns_name);
     cpu_address_space_init(cs, as, ARMASIdx_NS);
 #endif
 
     qemu_init_vcpu(cs);
+#if 0 /* Resetting CPU reads memory (to get SP, PC), but memory nodes in DT are not yet initialized.
+	 There's already a reset happening from qemu_system_reset after all loading is complete. */
     cpu_reset(cs);
+#endif
 
     acc->parent_realize(dev, errp);
 }

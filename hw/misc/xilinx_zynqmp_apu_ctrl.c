@@ -46,7 +46,7 @@
      OBJECT_CHECK(ZynqMPAPU, (obj), TYPE_ZYNQMP_APU)
 
 #ifndef XILINX_ZYNQMP_APU_ERR_DEBUG
-#define XILINX_ZYNQMP_APU_ERR_DEBUG 0
+#define XILINX_ZYNQMP_APU_ERR_DEBUG 1
 #endif
 
 #define DB_PRINT_L(lvl, fmt, args...) do {\
@@ -60,6 +60,8 @@
 #define HPSC
 #define HPSC_TRCH
 
+DEP_REG32(CONFIG0, 0x20)
+    DEP_FIELD(CONFIG0, VINITHI, 4, 8)
 DEP_REG32(RVBARADDR0L, 0x40)
 DEP_REG32(RVBARADDR0H, 0x44)
 DEP_REG32(RVBARADDR1L, 0x48)
@@ -79,7 +81,7 @@ REG32(RVBARADDR7L, 0x78)
 REG32(RVBARADDR7H, 0x7c)
 #endif
 DEP_REG32(PWRCTL, 0x90)
-    DEP_FIELD(PWRCTL, CPUPWRDWNREQ, 3, 0)
+    DEP_FIELD(PWRCTL, CPUPWRDWNREQ, 4, 0)
 
 #define R_MAX ((R_PWRCTL) + 1)
 
@@ -96,9 +98,11 @@ struct ZynqMPAPU {
     qemu_irq wfi_out[4];
     /* CPU Power status towards INTC Redirect. */
     qemu_irq cpu_power_status[4];
+    qemu_irq cpu_vinithi_irqs[4];
 
     uint8_t cpu_pwrdwn_req;
     uint8_t cpu_in_wfi;
+    uint8_t cpu_vinithi;
 
     uint32_t regs[R_MAX];
     DepRegisterInfo regs_info[R_MAX];
@@ -124,15 +128,30 @@ static void zynqmp_apu_reset(DeviceState *dev)
         dep_register_reset(&s->regs_info[i]);
     }
 
-    s->cpu_pwrdwn_req = 0;
+    s->cpu_pwrdwn_req = ~0;
     s->cpu_in_wfi = 0;
+    s->cpu_vinithi = 0;
     update_wfi_out(s);
+}
+
+static void zynqmp_apu_config0_post_write(DepRegisterInfo *reg, uint64_t val)
+{
+    ZynqMPAPU *s = ZYNQMP_APU(reg->opaque);
+    unsigned int i, new;
+
+    for (i = 0; i < NUM_CPUS; i++) {
+        new = val & (1 << R_CONFIG0_VINITHI_SHIFT << i);
+        /* Check if CPU's CPUPWRDNREQ has changed. If yes, update GPIOs. */
+        if (new != (s->cpu_vinithi & (1 << i))) {
+            qemu_set_irq(s->cpu_vinithi_irqs[i], !!new);
+        }
+        s->cpu_vinithi &= ~(1 << R_CONFIG0_VINITHI_SHIFT << i);
+        s->cpu_vinithi |= new;
+    }
 }
 
 static void zynqmp_apu_rvbar_post_write(DepRegisterInfo *reg, uint64_t val)
 {
-#ifdef HPSC
-#else
     ZynqMPAPU *s = ZYNQMP_APU(reg->opaque);
     int i;
 
@@ -145,7 +164,6 @@ static void zynqmp_apu_rvbar_post_write(DepRegisterInfo *reg, uint64_t val)
             DB_PRINT("Set RVBAR %d to %" PRIx64 "\n", i, rvbar);
         }
     }
-#endif
 }
 
 static void zynqmp_apu_pwrctl_post_write(DepRegisterInfo *reg, uint64_t val)
@@ -166,6 +184,10 @@ static void zynqmp_apu_pwrctl_post_write(DepRegisterInfo *reg, uint64_t val)
 }
 
 static const DepRegisterAccessInfo zynqmp_apu_regs_info[] = {
+    { .name = "CONFIG0",  .decode.addr = A_CONFIG0,
+            .reset = 0x0,
+            .post_write = zynqmp_apu_config0_post_write,
+    },
 #ifdef HPSC_TRCH
 #define RVBAR_REGDEF(n) \
     {   .name = "RVBAR CPU " #n " Low",  .decode.addr = A_RVBARADDR ## n ## L, \
@@ -204,6 +226,7 @@ static const DepRegisterAccessInfo zynqmp_apu_regs_info[] = {
 #endif
 #endif
     { .name = "PWRCTL",  .decode.addr = A_PWRCTL,
+        .reset = 0x00ff, /* 8 CPUs, 1 bit per CPU indicating whether power is OFF */
         .post_write = zynqmp_apu_pwrctl_post_write,
     }
 };
@@ -274,6 +297,7 @@ static void zynqmp_apu_init(Object *obj)
     /* CPU_POWER_STATUS is used to connect to INTC redirect. */
     qdev_init_gpio_out_named(DEVICE(obj), s->cpu_power_status,
                              "CPU_POWER_STATUS", 4);
+    qdev_init_gpio_out_named(DEVICE(obj), s->cpu_vinithi_irqs, "VINITHI", 4);
     /* wfi_in is used as input from CPUs as wfi request. */
     qdev_init_gpio_in_named(DEVICE(obj), zynqmp_apu_handle_wfi, "wfi_in", 4);
 }
